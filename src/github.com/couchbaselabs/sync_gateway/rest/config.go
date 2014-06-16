@@ -18,7 +18,6 @@ import (
 	"net/url"
 	"os"
 	"runtime"
-	"syscall"
 
 	"github.com/couchbaselabs/sync_gateway/base"
 )
@@ -42,25 +41,26 @@ const DefaultMaxFileDescriptors uint64 = 5000
 
 // JSON object that defines the server configuration.
 type ServerConfig struct {
-	Interface               *string         // Interface to bind REST API to, default ":4984"
-	SSLCert                 *string         // Path to SSL cert file, or nil
-	SSLKey                  *string         // Path to SSL private key file, or nil
-	AdminInterface          *string         // Interface to bind admin API to, default ":4985"
-	AdminUI                 *string         // Path to Admin HTML page, if omitted uses bundled HTML
-	ProfileInterface        *string         // Interface to bind Go profile API to (no default)
-	ConfigServer            *string         // URL of config server (for dynamic db discovery)
-	Persona                 *PersonaConfig  // Configuration for Mozilla Persona validation
-	Facebook                *FacebookConfig // Configuration for Facebook validation
-	Log                     []string        // Log keywords to enable
-	Pretty                  bool            // Pretty-print JSON responses?
-	DeploymentID            *string         // Optional customer/deployment ID for stats reporting
-	StatsReportInterval     *float64        // Optional stats report interval (0 to disable)
-	MaxCouchbaseConnections *int            // Max # of sockets to open to a Couchbase Server node
-	MaxCouchbaseOverflow    *int            // Max # of overflow sockets to open
-	MaxIncomingConnections  *int            // Max # of incoming HTTP connections to accept
-	MaxFileDescriptors      *uint64         // Max # of open file descriptors (RLIMIT_NOFILE)
-	CompressResponses       *bool           // If false, disables compression of HTTP responses
-	Databases               DbConfigMap     // Pre-configured databases, mapped by name
+	Interface                      *string         // Interface to bind REST API to, default ":4984"
+	SSLCert                        *string         // Path to SSL cert file, or nil
+	SSLKey                         *string         // Path to SSL private key file, or nil
+	AdminInterface                 *string         // Interface to bind admin API to, default ":4985"
+	AdminUI                        *string         // Path to Admin HTML page, if omitted uses bundled HTML
+	ProfileInterface               *string         // Interface to bind Go profile API to (no default)
+	ConfigServer                   *string         // URL of config server (for dynamic db discovery)
+	Persona                        *PersonaConfig  // Configuration for Mozilla Persona validation
+	Facebook                       *FacebookConfig // Configuration for Facebook validation
+	Log                            []string        // Log keywords to enable
+	Pretty                         bool            // Pretty-print JSON responses?
+	DeploymentID                   *string         // Optional customer/deployment ID for stats reporting
+	StatsReportInterval            *float64        // Optional stats report interval (0 to disable)
+	MaxCouchbaseConnections        *int            // Max # of sockets to open to a Couchbase Server node
+	MaxCouchbaseOverflow           *int            // Max # of overflow sockets to open
+	SlowServerCallWarningThreshold *int            // Log warnings if database calls take this many ms
+	MaxIncomingConnections         *int            // Max # of incoming HTTP connections to accept
+	MaxFileDescriptors             *uint64         // Max # of open file descriptors (RLIMIT_NOFILE)
+	CompressResponses              *bool           // If false, disables compression of HTTP responses
+	Databases                      DbConfigMap     // Pre-configured databases, mapped by name
 }
 
 // JSON object that defines a database configuration within the ServerConfig.
@@ -317,21 +317,11 @@ func setMaxFileDescriptors(maxP *uint64) {
 	if maxP != nil {
 		maxFDs = *maxP
 	}
-	var limits syscall.Rlimit
-	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &limits); err != nil {
-		base.LogFatal("Getrlimit failed: %v", err)
-	}
-	if maxFDs > limits.Max {
-		maxFDs = limits.Max
-	}
-	if limits.Cur != maxFDs {
-		limits.Cur = maxFDs
-		limits.Max = maxFDs
-		err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &limits)
-		if err != nil {
-			base.LogFatal("Error raising MaxFileDescriptors to %d: %v", maxFDs, err)
-		}
-		base.Log("Configured MaxFileDescriptors (RLIMIT_NOFILE) to %d", maxFDs)
+	actualMax, err := base.SetMaxFileDescriptors(maxFDs)
+	if err != nil {
+		base.Warn("Error setting MaxFileDescriptors to %d: %v", maxFDs, err)
+	} else if maxP != nil {
+		base.Log("Configured process to allow %d open file descriptors", actualMax)
 	}
 }
 
@@ -350,7 +340,7 @@ func (config *ServerConfig) serve(addr string, handler http.Handler) {
 func RunServer(config *ServerConfig) {
 	PrettyPrint = config.Pretty
 
-	base.Log("==== %s ====", VersionString)
+	base.Log("==== %s ====", LongVersionString)
 
 	if os.Getenv("GOMAXPROCS") == "" && runtime.GOMAXPROCS(0) == 1 {
 		cpus := runtime.NumCPU()
